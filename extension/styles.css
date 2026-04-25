@@ -170,3 +170,55 @@
   border-radius: 50%;
   border: 2px solid #18181b;
 }
+
+/* Calendar account-switch banner */
+.mar-account-banner {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 999999;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: rgba(24, 24, 27, 0.97);
+  color: #e4e4e7;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 13px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  animation: mar-slide-in 0.25s ease-out;
+  max-width: 520px;
+}
+
+.mar-account-banner b { color: #fafafa; font-weight: 600; }
+
+.mar-btn-primary,
+.mar-btn-ghost {
+  border: none;
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.mar-btn-primary {
+  background: #1a73e8;
+  color: white;
+}
+
+.mar-btn-primary:hover { background: #1557b0; }
+
+.mar-btn-ghost {
+  background: transparent;
+  color: #a1a1aa;
+  font-size: 16px;
+  padding: 4px 8px;
+}
+
+.mar-btn-ghost:hover { color: #fafafa; }

@@ -11,6 +11,70 @@
   let isProcessing = false;
   let pendingAutoConfig = false;
 
+  let SETTINGS = window.MAR_SETTINGS?.DEFAULTS
+    ? { ...window.MAR_SETTINGS.DEFAULTS }
+    : { preferredAuthuser: null, showBanners: true };
+
+  if (window.MAR_SETTINGS) {
+    window.MAR_SETTINGS.getSettings().then((s) => { SETTINGS = s; });
+    window.MAR_SETTINGS.onSettingsChange((patch) => { SETTINGS = { ...SETTINGS, ...patch }; });
+  }
+
+  // When the user has granted edit access on a different Google account's
+  // calendar (e.g. the Workspace account), the event editor's Calendar
+  // selector lets them store the new event there. Auto-pick the preferred
+  // calendar so recording-capable Workspace settings become available.
+  const appliedCalendarForDialog = new WeakSet();
+
+  async function autoSelectPreferredCalendar(scope = document) {
+    const pref = (SETTINGS?.preferredCalendar || '').trim();
+    if (!pref) return false;
+
+    // The quick-create modal's Calendar combobox renders incrementally.
+    // Retry briefly until we see it (or give up).
+    let combo = null;
+    for (let i = 0; i < 15; i++) {
+      combo = scope.querySelector('[role="combobox"][aria-label="Calendar" i]');
+      if (combo) break;
+      await sleep(200);
+    }
+    if (!combo) return false;
+    if (appliedCalendarForDialog.has(combo)) return false;
+
+    const matches = (optionText) => {
+      const a = (optionText || '').trim().toLowerCase();
+      const b = pref.toLowerCase();
+      return a === b || a.includes(b) || b.includes(a);
+    };
+
+    // Already set to the preferred one?
+    if (matches(combo.textContent)) {
+      appliedCalendarForDialog.add(combo);
+      console.log('[Meet Auto Record] Calendar already matches preference');
+      return true;
+    }
+
+    combo.click();
+    for (let attempt = 0; attempt < 15; attempt++) {
+      await sleep(200);
+      const lb = document.querySelector('[role="listbox"][aria-label="List of calendars" i]');
+      if (!lb) continue;
+      const options = lb.querySelectorAll('[role="option"]');
+      for (const opt of options) {
+        if (matches(opt.textContent)) {
+          opt.click();
+          appliedCalendarForDialog.add(combo);
+          console.log('[Meet Auto Record] Selected calendar:', (opt.textContent || '').trim());
+          return true;
+        }
+      }
+    }
+    // Collapse the listbox (user didn't have a matching calendar).
+    combo.click();
+    console.log('[Meet Auto Record] Preferred calendar not found. Available options did not match:', pref);
+    return false;
+  }
+
   // ============================================
   // PostMessage Handshake with Iframe
   // ============================================
@@ -321,6 +385,9 @@
             if (dialog) {
               // Reset flag for new dialog
               hasClickedSettingsForCurrentEvent = false;
+              // Switch to the preferred calendar (if configured) so Workspace
+              // Video-call-options becomes available on the event.
+              autoSelectPreferredCalendar(dialog);
               checkForMeetLinkInDialog(dialog);
             }
 
@@ -390,8 +457,24 @@
     setupModalObserver();
     detectEventCreation();
 
+    // If user loaded the full event editor directly, try to swap calendars.
+    // SETTINGS may not be loaded yet; retry briefly.
+    if (/\/eventedit\b/.test(window.location.pathname)) {
+      const tryPick = (attempt = 0) => {
+        if (attempt > 20) return;
+        if (!SETTINGS?.preferredCalendar) {
+          setTimeout(() => tryPick(attempt + 1), 300);
+          return;
+        }
+        autoSelectPreferredCalendar().then((ok) => {
+          if (!ok) setTimeout(() => tryPick(attempt + 1), 300);
+        });
+      };
+      tryPick();
+    }
+
     // Show initialization toast (only once per session)
-    if (!sessionStorage.getItem('mar-calendar-init')) {
+    if (SETTINGS.showBanners && !sessionStorage.getItem('mar-calendar-init')) {
       sessionStorage.setItem('mar-calendar-init', 'true');
       showToast('info', 'Meet Auto Record', 'Extension active on Google Calendar', 3000);
     }

@@ -18,20 +18,56 @@
     TOAST_DURATION: 5000
   };
 
+  // Populated from chrome.storage.sync via settings.js. Defaults applied until loaded.
+  let SETTINGS = window.MAR_SETTINGS?.DEFAULTS
+    ? { ...window.MAR_SETTINGS.DEFAULTS }
+    : {
+        language: 'English',
+        autoRecord: true,
+        transcription: true,
+        geminiNotes: true,
+        captions: false,
+        showBanners: true
+      };
+
+  if (window.MAR_SETTINGS) {
+    window.MAR_SETTINGS.getSettings().then((s) => {
+      SETTINGS = s;
+      CONFIG.LANGUAGE = s.language || CONFIG.LANGUAGE;
+    });
+    window.MAR_SETTINGS.onSettingsChange((patch) => {
+      SETTINGS = { ...SETTINGS, ...patch };
+      if (patch.language) CONFIG.LANGUAGE = patch.language;
+    });
+  }
+
   // ============================================
-  // Context Detection
+  // Context Detection (reactive — Meet uses SPA nav)
   // ============================================
 
-  const CONTEXT = {
-    isCalendarSettings: window.location.href.includes('calendarsettings'),
-    isMeetCall: /^https:\/\/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}/.test(window.location.href)
-  };
+  function computeContext() {
+    const url = window.location.href;
+    const path = window.location.pathname || '';
+    return {
+      url,
+      isCalendarSettings: url.includes('calendarsettings'),
+      // Meet room path is e.g. /vdw-fvmp-kcu — 3+ letter segments, dash-separated.
+      // Landing pages like "/", "/new", "/landing" don't match.
+      isMeetCall: /^\/[a-z]{3,}-[a-z]{3,}-[a-z]{3,}(?:\/|$|\?)/.test(path)
+    };
+  }
 
+  let CONTEXT = computeContext();
   let toastContainer = null;
   let hasAttemptedAutoRecord = false;
   let isProcessing = false;
+  let meetCallSetupDone = false;
+  let autoRecordAttempts = 0;
+  let autoRecordAbandoned = false;
+  const MAX_AUTO_RECORD_ATTEMPTS = 2;
 
-  console.log('[Meet Auto Record] Context:', CONTEXT);
+  const MAR_VERSION = chrome?.runtime?.getManifest?.()?.version || 'dev';
+  console.log(`[Meet Auto Record v${MAR_VERSION}] loaded`, CONTEXT);
 
   // ============================================
   // Toast Notification System
@@ -223,6 +259,27 @@
     return null;
   }
 
+  async function captureLanguagesFromDropdown() {
+    if (!window.MAR_SETTINGS?.saveLanguages) return;
+    const rawOptions = document.querySelectorAll('[role="option"], option');
+    const names = [];
+    const seen = new Set();
+    for (const opt of rawOptions) {
+      // Each option renders as e.g. "French\nALPHA". Strip the "ALPHA"/"BETA" tag.
+      const raw = (opt.textContent || opt.value || '').trim();
+      if (!raw) continue;
+      const clean = raw.replace(/\b(ALPHA|BETA|NEW|PREVIEW)\b/gi, '').replace(/\s+/g, ' ').trim();
+      if (!clean || /select a language/i.test(clean)) continue;
+      if (seen.has(clean)) continue;
+      seen.add(clean);
+      names.push(clean);
+    }
+    if (names.length > 0) {
+      await window.MAR_SETTINGS.saveLanguages(names);
+      console.log('[Meet Auto Record] Captured supported languages:', names);
+    }
+  }
+
   async function selectLanguage(language) {
     // Find the language dropdown
     const languageSelect = document.querySelector('select, [role="listbox"], [role="combobox"]');
@@ -234,23 +291,29 @@
 
     // Click to open dropdown
     languageSelect.click();
-    await sleep(300);
+    await sleep(400);
+
+    // Capture the list of supported languages before we pick one.
+    await captureLanguagesFromDropdown();
 
     // Find and click the language option
     const options = document.querySelectorAll('[role="option"], option');
     for (const option of options) {
-      if (option.textContent?.includes(language) || option.value === language) {
+      const text = (option.textContent || option.value || '').replace(/\b(ALPHA|BETA|NEW|PREVIEW)\b/gi, '').trim();
+      if (text === language || text.toLowerCase() === language.toLowerCase()) {
         option.click();
         console.log(`[Meet Auto Record] Selected language: ${language}`);
         return;
       }
     }
 
-    // Try clicking directly on text
-    const langOption = findElementByText(language, '[role="option"], option');
-    if (langOption) {
-      langOption.click();
-      console.log(`[Meet Auto Record] Selected language by text: ${language}`);
+    // Fallback: substring match (e.g. "Portuguese" → "Portuguese (Brazil)")
+    for (const option of options) {
+      if (option.textContent?.includes(language)) {
+        option.click();
+        console.log(`[Meet Auto Record] Selected language by substring: ${language}`);
+        return;
+      }
     }
   }
 
@@ -262,24 +325,27 @@
                     checkbox.getAttribute('aria-label') ||
                     checkbox.parentElement?.textContent || '';
 
-      const isRecordingOption =
-        label.includes('Gemini') ||
-        label.includes('notes') ||
-        label.includes('Transcribe') ||
-        label.includes('transcript') ||
-        label.includes('Record') ||
-        label.includes('recording');
+      // Map category -> user setting. For the Calendar Settings iframe we also
+      // manage the "Record meeting" checkbox itself: it follows autoRecord.
+      let shouldEnable = null;
+      if (/gemini|notes/i.test(label)) shouldEnable = SETTINGS.geminiNotes !== false;
+      else if (/transcribe|transcript/i.test(label)) shouldEnable = SETTINGS.transcription !== false;
+      else if (/caption/i.test(label)) shouldEnable = SETTINGS.captions === true;
+      else if (/record/i.test(label)) shouldEnable = SETTINGS.autoRecord !== false;
+      else continue;
 
-      if (isRecordingOption) {
-        const isChecked = checkbox.getAttribute('aria-checked') === 'true' ||
-                         checkbox.checked === true ||
-                         checkbox.getAttribute('checked') !== null;
+      const isChecked = checkbox.getAttribute('aria-checked') === 'true' ||
+                       checkbox.checked === true ||
+                       checkbox.getAttribute('checked') !== null;
 
-        if (!isChecked && !checkbox.disabled) {
-          checkbox.click();
-          console.log(`[Meet Auto Record] Enabled checkbox: ${label.substring(0, 50)}`);
-          await sleep(200);
-        }
+      if (shouldEnable && !isChecked && !checkbox.disabled) {
+        checkbox.click();
+        console.log(`[Meet Auto Record] Enabled: ${label.substring(0, 50)}`);
+        await sleep(200);
+      } else if (!shouldEnable && isChecked && !checkbox.disabled) {
+        checkbox.click();
+        console.log(`[Meet Auto Record] Disabled (per settings): ${label.substring(0, 50)}`);
+        await sleep(200);
       }
     }
   }
@@ -304,19 +370,25 @@
   // ============================================
 
   function isRecordingActive() {
-    // Check for recording indicators
-    const recordingIndicators = [
-      () => findElementByText('This call is being recorded'),
-      () => findElementByText('Recording'),
-      () => document.querySelector('[aria-label*="Stop recording"]'),
-      () => document.querySelector('button[aria-label*="recording"][aria-label*="stop"]')
-    ];
+    // High-signal checks only — avoid matching the word "Recording" in random UI.
+    if (document.querySelector('[aria-label*="Stop recording" i]')) return true;
+    if (document.querySelector('button[aria-label*="recording" i][aria-label*="stop" i]')) return true;
 
-    for (const check of recordingIndicators) {
-      if (check()) {
-        console.log('[Meet Auto Record] Recording is already active');
+    // The red "REC" pill / "This call is being recorded" banner.
+    const banners = document.querySelectorAll('[role="status"], [aria-live], [data-self-name]');
+    for (const el of banners) {
+      const t = (el.textContent || '').toLowerCase();
+      if (t.includes('this call is being recorded') ||
+          t.includes('this meeting is being recorded') ||
+          t.includes('recording has started')) {
         return true;
       }
+    }
+
+    // Generic fallback — match exact indicator phrases anywhere on page.
+    if (findElementByText('This call is being recorded') ||
+        findElementByText('This meeting is being recorded')) {
+      return true;
     }
 
     return false;
@@ -335,9 +407,28 @@
     return true; // Will be validated during the recording attempt
   }
 
+  async function abandonAutoRecord(reason) {
+    autoRecordAbandoned = true;
+    hasAttemptedAutoRecord = true;
+    isProcessing = false;
+    hideIndicator();
+    try { await closeMeetingToolsPanel(); } catch (_) {}
+    console.log('[Meet Auto Record] Giving up for this call:', reason);
+  }
+
   async function startAutoRecording() {
+    if (autoRecordAbandoned) {
+      console.log('[Meet Auto Record] Already abandoned for this call');
+      return;
+    }
     if (hasAttemptedAutoRecord || isProcessing) {
       console.log('[Meet Auto Record] Already attempted or processing');
+      return;
+    }
+
+    if (!SETTINGS.autoRecord) {
+      console.log('[Meet Auto Record] Auto-record disabled in settings');
+      hasAttemptedAutoRecord = true;
       return;
     }
 
@@ -347,15 +438,19 @@
     }
 
     if (isRecordingActive()) {
-      console.log('[Meet Auto Record] Recording already active');
-      showToast('info', 'Meet Auto Record', 'Recording is already active');
+      console.log('[Meet Auto Record] Recording already active — standing down');
+      if (SETTINGS.showBanners) {
+        showToast('info', 'Meet Auto Record', 'Recording is already active — nothing to do');
+      }
       hasAttemptedAutoRecord = true;
       return;
     }
 
     isProcessing = true;
     hasAttemptedAutoRecord = true;
+    autoRecordAttempts++;
     showIndicator('Starting recording...');
+    console.log(`[Meet Auto Record] Attempt ${autoRecordAttempts}/${MAX_AUTO_RECORD_ATTEMPTS}`);
 
     try {
       // Step 1: Open Meeting tools panel
@@ -363,12 +458,66 @@
       if (!meetingToolsOpened) {
         throw new Error('Could not open Meeting tools');
       }
-      await sleep(500);
+      await sleep(700);
+
+      // Re-check after the panel opens — recording banner sometimes appears late,
+      // and the side panel exposes a "Stop recording" item when recording is live.
+      if (isRecordingActive() || document.querySelector('[aria-label*="Stop recording" i]')) {
+        console.log('[Meet Auto Record] Detected active recording after opening panel — aborting');
+        await closeMeetingToolsPanel();
+        hideIndicator();
+        if (SETTINGS.showBanners) {
+          showToast('info', 'Meet Auto Record', 'Recording is already active — nothing to do');
+        }
+        return;
+      }
 
       // Step 2: Click on Recording option
       const recordingClicked = await clickRecordingOption();
       if (!recordingClicked) {
-        throw new Error('Recording option not available - you may not have permission');
+        // Did the panel populate with other tools? If yes, Record is genuinely
+        // missing (non-Workspace / lower plan). If no, it's a load-timing glitch.
+        const panelHasOtherTools = document.querySelector(
+          '[role="button"][aria-label^="Speech translation" i], ' +
+          '[role="button"][aria-label^="Breakout rooms" i], ' +
+          '[role="button"][aria-label^="Polls" i], ' +
+          '[role="button"][aria-label^="Q&A" i]'
+        );
+
+        if (panelHasOtherTools) {
+          await abandonAutoRecord('recording not offered on this account');
+          if (SETTINGS.showBanners) {
+            showToast(
+              'warning',
+              'Meet Auto Record',
+              'Recording isn\'t offered on this account. Workspace Business Standard or higher is required.',
+              8000
+            );
+          }
+          return;
+        }
+
+        // Timing/load glitch. Allow ONE retry total; then give up cleanly.
+        if (autoRecordAttempts >= MAX_AUTO_RECORD_ATTEMPTS) {
+          await abandonAutoRecord('meeting tools never populated after max attempts');
+          if (SETTINGS.showBanners) {
+            showToast('warning', 'Meet Auto Record', 'Could not start recording on this call.', 6000);
+          }
+          return;
+        }
+
+        // One more try on the next tick.
+        await closeMeetingToolsPanel();
+        hasAttemptedAutoRecord = false;
+        isProcessing = false;
+        hideIndicator();
+        console.log('[Meet Auto Record] Meeting tools panel never populated — retrying once');
+        setTimeout(() => {
+          if (!autoRecordAbandoned && !hasAttemptedAutoRecord && isInActiveMeeting() && !isRecordingActive()) {
+            startAutoRecording();
+          }
+        }, 5000);
+        return;
       }
       await sleep(500);
 
@@ -402,61 +551,215 @@
     } catch (error) {
       console.error('[Meet Auto Record] Auto-recording error:', error);
       hideIndicator();
-      showToast('error', 'Meet Auto Record', error.message);
+
+      if (autoRecordAttempts >= MAX_AUTO_RECORD_ATTEMPTS) {
+        await abandonAutoRecord('max attempts reached after error: ' + error.message);
+        if (SETTINGS.showBanners) {
+          showToast('warning', 'Meet Auto Record', 'Could not start recording on this call.', 6000);
+        }
+      } else {
+        // One more try.
+        hasAttemptedAutoRecord = false;
+        isProcessing = false;
+        if (SETTINGS.showBanners) {
+          showToast('error', 'Meet Auto Record', error.message);
+        }
+        setTimeout(() => {
+          if (!autoRecordAbandoned && !hasAttemptedAutoRecord && isInActiveMeeting() && !isRecordingActive()) {
+            console.log('[Meet Auto Record] Retrying auto-record after transient error');
+            startAutoRecording();
+          }
+        }, 5000);
+      }
     } finally {
       isProcessing = false;
     }
   }
 
-  async function openMeetingTools() {
-    // Find Meeting tools button
-    const meetingToolsBtn = findButtonByAriaLabel('Meeting tools') ||
-                           findElementByText('Meeting tools', 'button');
+  function findActivitiesButton() {
+    // Google labels this button differently across accounts/rollouts:
+    //   Workspace:  "Meeting tools"
+    //   Personal:   "More activities in this meeting."
+    //   Older UI:   "Activities"
+    const selectors = [
+      'button[aria-label*="Meeting tools" i]',
+      '[role="button"][aria-label*="Meeting tools" i]',
+      'button[aria-label*="More activities" i]',
+      '[role="button"][aria-label*="More activities" i]',
+      'button[aria-label="Activities"]',
+      '[role="button"][aria-label="Activities"]'
+    ];
+    for (const sel of selectors) {
+      const el = document.querySelector(sel);
+      if (el) return el;
+    }
+    return findElementByText('Meeting tools', 'button') ||
+           findElementByText('Activities', 'button');
+  }
 
-    if (!meetingToolsBtn) {
-      console.log('[Meet Auto Record] Meeting tools button not found');
+  async function waitForActivitiesButton(timeoutMs = 15000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const btn = findActivitiesButton();
+      if (btn) return btn;
+      await sleep(400);
+    }
+    return null;
+  }
+
+  async function openMeetingTools() {
+    const btn = await waitForActivitiesButton();
+
+    if (!btn) {
+      console.log('[Meet Auto Record] Meeting tools button never appeared');
       return false;
     }
 
     // Check if already expanded
-    if (meetingToolsBtn.getAttribute('aria-expanded') === 'true') {
-      console.log('[Meet Auto Record] Meeting tools already open');
+    if (btn.getAttribute('aria-expanded') === 'true') {
+      console.log('[Meet Auto Record] Activities panel already open');
       return true;
     }
 
-    meetingToolsBtn.click();
-    console.log('[Meet Auto Record] Opened Meeting tools');
+    btn.click();
+    console.log('[Meet Auto Record] Opened activities panel:', btn.getAttribute('aria-label'));
     return true;
   }
 
+  function isStopRecordingText(text) {
+    const t = (text || '').toLowerCase();
+    return t.includes('stop recording') || t.includes('stop the recording');
+  }
+
+  // Matches the entry point in the Meeting tools side panel. Google has used
+  // several labels across rollouts: "Recording", "Record", "Record meeting".
+  function isRecordEntryText(text) {
+    const t = (text || '').trim().toLowerCase();
+    if (!t) return false;
+    if (isStopRecordingText(t)) return false;
+    // Match either of the headline phrasings. The panel row aria-label is
+    // e.g. "Record Capture the meeting" — so a prefix / word-boundary match
+    // on "record" at the start catches both variants.
+    return /^record\b/i.test(t) || /\brecording\b/i.test(t);
+  }
+
+  function panelHasPopulated() {
+    // The panel is "live" when we can see any of the standard tool entries.
+    return !!document.querySelector(
+      '[role="button"][aria-label^="Speech translation" i], ' +
+      '[role="button"][aria-label^="Record " i], ' +
+      '[role="button"][aria-label^="Breakout rooms" i], ' +
+      '[role="button"][aria-label^="Polls" i], ' +
+      '[role="button"][aria-label^="Q&A" i], ' +
+      '[role="button"][aria-label^="Timer" i]'
+    );
+  }
+
   async function clickRecordingOption() {
-    // Wait for the side panel to appear
-    await sleep(500);
+    const SEL_ITEM = '[role="option"], [role="menuitem"], [role="button"], button';
 
-    // Find Recording option in the list
-    const recordingOption = document.querySelector('[role="option"][value*="Recording"]') ||
-                           document.querySelector('[role="option"][aria-label*="Recording"]') ||
-                           findElementByText('Recording', '[role="option"]');
+    // Kick: if the panel was opened but never populated after ~2.5s,
+    // re-click the Meeting tools button — Meet sometimes drops the first click
+    // on a cold join before its handler is wired up.
+    let kicked = false;
 
-    if (!recordingOption) {
-      // Try finding in listbox
-      const listbox = document.querySelector('[role="listbox"]');
-      if (listbox) {
-        const options = listbox.querySelectorAll('[role="option"]');
-        for (const opt of options) {
-          if (opt.textContent?.includes('Recording')) {
-            opt.click();
-            console.log('[Meet Auto Record] Clicked Recording option');
+    // Wait up to 6s — the Meeting tools panel typically populates around
+    // 1.5s but can take longer on cold joins.
+    for (let i = 0; i < 12; i++) {
+      await sleep(500);
+
+      // After ~2.5s with no tools showing, assume Meet dropped the first
+      // click. Close the panel and re-open it to try again.
+      if (!kicked && i >= 5 && !panelHasPopulated()) {
+        console.log('[Meet Auto Record] Panel still empty — re-clicking Meeting tools');
+        const btn = findActivitiesButton();
+        if (btn) {
+          // Collapse first if still expanded, then re-open.
+          if (btn.getAttribute('aria-expanded') === 'true') {
+            btn.click();
+            await sleep(300);
+          }
+          btn.click();
+          kicked = true;
+          continue;
+        }
+      }
+
+      // Direct attribute-based candidates (older and newer UIs)
+      const directSelectors = [
+        '[role="button"][aria-label^="Record " i]',
+        '[role="button"][aria-label="Record" i]',
+        '[role="option"][aria-label*="Recording" i]',
+        '[role="menuitem"][aria-label*="Recording" i]',
+        '[role="option"][value*="Recording" i]'
+      ];
+      for (const sel of directSelectors) {
+        const direct = document.querySelector(sel);
+        if (!direct) continue;
+        const label = (direct.getAttribute('aria-label') || '') + ' ' + (direct.textContent || '');
+        if (isStopRecordingText(label)) continue;
+        direct.click();
+        console.log('[Meet Auto Record] Clicked Record option (direct):', sel);
+        return true;
+      }
+
+      const panels = document.querySelectorAll('[role="listbox"], [role="menu"], [role="complementary"], [aria-label*="Meeting tools" i], [aria-label="Side panel"]');
+      for (const panel of panels) {
+        const items = panel.querySelectorAll(SEL_ITEM);
+        for (const item of items) {
+          const label = item.getAttribute('aria-label') || '';
+          const text = (item.textContent || '').trim();
+          if (isStopRecordingText(label + ' ' + text)) continue;
+          if (isRecordEntryText(label) || isRecordEntryText(text)) {
+            item.click();
+            console.log('[Meet Auto Record] Clicked Record option (panel scan):', label || text.slice(0, 40));
             return true;
           }
         }
       }
-      return false;
+
+      // Last-resort: scan the whole document for a role=button with matching label
+      const all = document.querySelectorAll('[role="button"]');
+      for (const item of all) {
+        const label = item.getAttribute('aria-label') || '';
+        if (isStopRecordingText(label)) continue;
+        if (/^record\b/i.test(label) || /^record\s+/i.test(label)) {
+          item.click();
+          console.log('[Meet Auto Record] Clicked Record option (global scan):', label);
+          return true;
+        }
+      }
     }
 
-    recordingOption.click();
-    console.log('[Meet Auto Record] Clicked Recording option');
-    return true;
+    return false;
+  }
+
+  function getCheckboxLabel(cb) {
+    // Native checkboxes in Meet's Recording panel have no aria-label and
+    // no direct text. The label text lives 1–3 ancestors up.
+    const explicit = cb.getAttribute('aria-label');
+    if (explicit) return explicit;
+
+    if (cb.getAttribute('aria-labelledby')) {
+      const refs = cb.getAttribute('aria-labelledby').split(/\s+/);
+      for (const id of refs) {
+        const node = document.getElementById(id);
+        if (node?.textContent) return node.textContent.trim();
+      }
+    }
+
+    if (cb.id) {
+      const lab = document.querySelector(`label[for="${cb.id}"]`);
+      if (lab?.textContent) return lab.textContent.trim();
+    }
+
+    // Walk up and grab the first ancestor whose text is long enough to be a label.
+    let node = cb.parentElement;
+    for (let depth = 0; node && depth < 5; depth++, node = node.parentElement) {
+      const t = (node.innerText || node.textContent || '').trim();
+      if (t.length >= 5 && t.length <= 120) return t;
+    }
+    return '';
   }
 
   async function enableRecordingCheckboxes() {
@@ -465,40 +768,49 @@
     const checkboxes = document.querySelectorAll('[role="checkbox"], input[type="checkbox"]');
 
     for (const checkbox of checkboxes) {
-      const label = checkbox.textContent ||
-                    checkbox.getAttribute('aria-label') ||
-                    checkbox.parentElement?.textContent ||
-                    checkbox.nextSibling?.textContent || '';
+      const label = getCheckboxLabel(checkbox);
+      const lower = label.toLowerCase();
 
-      // Skip "stop" checkboxes (these appear when recording is active)
-      if (label.toLowerCase().includes('stop')) {
-        continue;
-      }
+      if (lower.includes('stop')) continue;
 
-      const isRecordingOption =
-        label.includes('Gemini') ||
-        label.includes('notes') ||
-        label.includes('transcript') ||
-        label.includes('caption');
+      let shouldEnable = null;
+      // Order matters: "Take Notes with Gemini" also contains the word "notes".
+      if (/gemini|take notes|notes/i.test(label)) shouldEnable = SETTINGS.geminiNotes !== false;
+      else if (/transcript/i.test(label)) shouldEnable = SETTINGS.transcription !== false;
+      else if (/caption/i.test(label)) shouldEnable = SETTINGS.captions === true;
+      else continue;
 
-      if (isRecordingOption) {
-        const isChecked = checkbox.getAttribute('aria-checked') === 'true' || checkbox.checked;
+      const isChecked = checkbox.getAttribute('aria-checked') === 'true' || checkbox.checked;
 
-        if (!isChecked && !checkbox.disabled) {
-          checkbox.click();
-          console.log(`[Meet Auto Record] Enabled: ${label.substring(0, 40)}`);
-          await sleep(150);
-        }
+      if (shouldEnable && !isChecked && !checkbox.disabled) {
+        checkbox.click();
+        console.log(`[Meet Auto Record] Enabled: ${label.substring(0, 60)}`);
+        await sleep(150);
+      } else if (!shouldEnable && isChecked && !checkbox.disabled) {
+        checkbox.click();
+        console.log(`[Meet Auto Record] Disabled (per settings): ${label.substring(0, 60)}`);
+        await sleep(150);
       }
     }
   }
 
+  function findStartRecordingButton() {
+    return document.querySelector('button[aria-label="Start recording" i]') ||
+           document.querySelector('button[aria-label*="Start recording" i]') ||
+           findElementByText('Start recording', 'button');
+  }
+
   async function clickStartRecording() {
-    const startButton = findElementByText('Start recording', 'button') ||
-                       document.querySelector('button[aria-label*="Start recording"]');
+    // Wait up to 6s for the Recording sub-panel to finish rendering.
+    let startButton = null;
+    for (let i = 0; i < 12; i++) {
+      startButton = findStartRecordingButton();
+      if (startButton && !startButton.disabled) break;
+      await sleep(500);
+    }
 
     if (!startButton) {
-      console.log('[Meet Auto Record] Start recording button not found');
+      console.log('[Meet Auto Record] Start recording button never appeared');
       return false;
     }
 
@@ -512,38 +824,51 @@
     return true;
   }
 
-  async function handleRecordingDialogs() {
-    // Handle "Take notes with Gemini" info dialog
-    for (let i = 0; i < 3; i++) {
-      await sleep(500);
+  function findConsentDialogStart() {
+    const dialogs = document.querySelectorAll('[role="dialog"], [role="alertdialog"]');
+    for (const dialog of dialogs) {
+      const text = (dialog.textContent || '').toLowerCase();
+      if (!/make sure everyone is ready|consent|recording this meeting/.test(text)) continue;
+      const buttons = dialog.querySelectorAll('button, [role="button"]');
+      for (const btn of buttons) {
+        const label = ((btn.textContent || '') + ' ' + (btn.getAttribute('aria-label') || '')).trim();
+        if (/^start\b/i.test(label) && !/cancel/i.test(label)) return btn;
+      }
+    }
+    return null;
+  }
 
+  async function handleRecordingDialogs() {
+    // Watch for dialogs over an 8s window. Meet shows "Got it"-style info
+    // dialogs first, then the "Make sure everyone is ready" consent.
+    const deadline = Date.now() + 8000;
+    let consentHandled = false;
+
+    while (Date.now() < deadline) {
+      await sleep(400);
+
+      // "Got it" / info-style dialogs
       const gotItBtn = findElementByText('Got it', 'button');
       if (gotItBtn) {
         gotItBtn.click();
         console.log('[Meet Auto Record] Clicked "Got it" dialog');
-        await sleep(300);
+        await sleep(200);
+        continue;
       }
-    }
 
-    // Handle consent dialog "Make sure everyone is ready"
-    await sleep(500);
-
-    const dialog = document.querySelector('[role="dialog"]');
-    if (dialog) {
-      const dialogText = dialog.textContent || '';
-
-      if (dialogText.includes('Make sure everyone is ready') || dialogText.includes('consent')) {
-        const startBtn = dialog.querySelector('button');
-        // Find the "Start" button (usually the last/primary button)
-        const buttons = dialog.querySelectorAll('button');
-        for (const btn of buttons) {
-          if (btn.textContent?.trim() === 'Start') {
-            btn.click();
-            console.log('[Meet Auto Record] Clicked Start in consent dialog');
-            return;
-          }
+      // Consent dialog
+      if (!consentHandled) {
+        const startBtn = findConsentDialogStart();
+        if (startBtn && !startBtn.disabled) {
+          startBtn.click();
+          consentHandled = true;
+          console.log('[Meet Auto Record] Clicked Start in consent dialog');
+          // Keep looping briefly to catch any follow-up "Got it" dialog.
         }
       }
+
+      // Exit early if recording is now actually live.
+      if (consentHandled && isRecordingActive()) return;
     }
   }
 
@@ -559,11 +884,11 @@
       return true;
     }
 
-    // Method 2: Toggle the Meeting tools button to close it
-    const meetingToolsBtn = findButtonByAriaLabel('Meeting tools');
-    if (meetingToolsBtn && meetingToolsBtn.getAttribute('aria-expanded') === 'true') {
-      meetingToolsBtn.click();
-      console.log('[Meet Auto Record] Closed side panel via Meeting tools toggle');
+    // Method 2: Toggle the activities button to close it
+    const activitiesBtn = findActivitiesButton();
+    if (activitiesBtn && activitiesBtn.getAttribute('aria-expanded') === 'true') {
+      activitiesBtn.click();
+      console.log('[Meet Auto Record] Closed side panel via activities toggle');
       return true;
     }
 
@@ -615,18 +940,62 @@
   // Initialization
   // ============================================
 
+  function setupMeetCallContext() {
+    CONTEXT = computeContext();
+    if (!CONTEXT.isMeetCall || meetCallSetupDone) return;
+    meetCallSetupDone = true;
+    console.log('[Meet Auto Record] Running in Meet Call context:', CONTEXT.url);
+
+    // Show initialization toast (once per Meet room)
+    const roomKey = 'mar-meet-init-' + window.location.pathname;
+    if (SETTINGS.showBanners && !sessionStorage.getItem(roomKey)) {
+      sessionStorage.setItem(roomKey, 'true');
+      const msg = SETTINGS.autoRecord
+        ? 'Extension active — will auto-start recording when you join'
+        : 'Extension active — auto-record disabled in settings';
+      showToast('info', 'Meet Auto Record', msg, 4000);
+    }
+
+    setupMeetingJoinDetection();
+  }
+
+  function startUrlMonitor() {
+    // Meet uses SPA navigation (history.pushState) — content scripts only
+    // run at document_load, so we must watch for URL changes ourselves.
+    let lastUrl = window.location.href;
+    const check = () => {
+      if (window.location.href !== lastUrl) {
+        lastUrl = window.location.href;
+        console.log('[Meet Auto Record] URL changed ->', lastUrl);
+        // Reset per-call state so a new room gets a fresh attempt.
+        hasAttemptedAutoRecord = false;
+        autoRecordAttempts = 0;
+        autoRecordAbandoned = false;
+        setupMeetCallContext();
+      }
+    };
+    setInterval(check, 500);
+    // Also patch history API for immediate notification
+    ['pushState', 'replaceState'].forEach(fn => {
+      const original = history[fn];
+      history[fn] = function() {
+        const result = original.apply(this, arguments);
+        setTimeout(check, 0);
+        return result;
+      };
+    });
+    window.addEventListener('popstate', check);
+  }
+
   function init() {
     console.log('[Meet Auto Record] Initializing...', CONTEXT);
 
     if (CONTEXT.isCalendarSettings) {
       // Running in Calendar Settings iframe
       // DON'T auto-run - wait for postMessage from parent (Calendar page)
-      // This prevents auto-configuration when user manually opens settings
       console.log('[Meet Auto Record] Running in Calendar Settings context - waiting for signal...');
 
-      // Set up listener for configure signal
       window.addEventListener('message', (event) => {
-        // Only accept messages from Google Calendar
         if (event.origin === 'https://calendar.google.com' &&
             event.data?.type === 'MAR_AUTO_CONFIGURE') {
           console.log('[Meet Auto Record] Received auto-configure signal from Calendar');
@@ -634,21 +1003,16 @@
         }
       });
 
-      // Tell parent we're ready to receive the configure signal
       window.parent.postMessage({ type: 'MAR_IFRAME_READY' }, 'https://calendar.google.com');
       console.log('[Meet Auto Record] Sent ready signal to parent');
-    } else if (CONTEXT.isMeetCall) {
-      // Running in actual Meet call
-      console.log('[Meet Auto Record] Running in Meet Call context');
-
-      // Show initialization toast
-      if (!sessionStorage.getItem('mar-meet-init')) {
-        sessionStorage.setItem('mar-meet-init', 'true');
-        showToast('info', 'Meet Auto Record', 'Extension active - will auto-start recording when you join', 4000);
-      }
-
-      setupMeetingJoinDetection();
+      return;
     }
+
+    // Any other meet.google.com page: set up reactive detection.
+    // Handles both direct loads (/xxx-xxxx-xxx) and SPA navigation from
+    // landing pages like meet.new → /new → /xxx-xxxx-xxx.
+    setupMeetCallContext();
+    startUrlMonitor();
   }
 
   // Run initialization

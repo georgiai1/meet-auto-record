@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <div class="logo">
+      <img src="icons/icon48.png" alt="">
+      <div>
+        <h1>Meet Auto Record</h1>
+        <p class="subtitle">Recording · Transcription · Gemini notes</p>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="group">
+      <label class="row">
+        <div>
+          <div class="row-title">Auto-start recording</div>
+          <div class="row-help">When you join a Meet call</div>
+        </div>
+        <input type="checkbox" id="autoRecord" class="switch">
+      </label>
+
+      <label class="row">
+        <div>
+          <div class="row-title">Transcription</div>
+          <div class="row-help">Enable transcript by default</div>
+        </div>
+        <input type="checkbox" id="transcription" class="switch">
+      </label>
+
+      <label class="row">
+        <div>
+          <div class="row-title">Gemini notes</div>
+          <div class="row-help">"Take notes with Gemini"</div>
+        </div>
+        <input type="checkbox" id="geminiNotes" class="switch">
+      </label>
+
+      <label class="row">
+        <div>
+          <div class="row-title">Closed captions</div>
+          <div class="row-help">Show live captions</div>
+        </div>
+        <input type="checkbox" id="captions" class="switch">
+      </label>
+    </section>
+
+    <section class="group">
+      <label class="row column">
+        <div class="row-title">Language</div>
+        <div class="row-help">For transcription & captions</div>
+        <select id="language"></select>
+      </label>
+    </section>
+
+    <section class="group">
+      <label class="row column">
+        <div class="row-title">Preferred calendar</div>
+        <div class="row-help">When creating an event, auto-pick this calendar in the Calendar dropdown (substring match). Leave blank to skip.</div>
+        <input type="text" id="preferredCalendar" placeholder="e.g. Cost-Effective Software">
+      </label>
+
+      <label class="row">
+        <div>
+          <div class="row-title">Show banners</div>
+          <div class="row-help">Toasts & hints on Meet/Calendar</div>
+        </div>
+        <input type="checkbox" id="showBanners" class="switch">
+      </label>
+    </section>
+  </main>
+
+  <footer>
+    <span id="status" class="status"></span>
+    <span class="version" id="version"></span>
+  </footer>
+
+  <script src="settings.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
