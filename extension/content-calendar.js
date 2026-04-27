@@ -295,6 +295,11 @@
       return;
     }
 
+    if (SETTINGS?.autoConfigureCalendar === false) {
+      console.log('[Meet Auto Record] Auto-configure-calendar disabled in settings');
+      return;
+    }
+
     isProcessing = true;
     console.log('[Meet Auto Record] Looking for Video call options button...');
 

@@ -7,7 +7,8 @@
 
   const DEFAULTS = {
     language: 'English',
-    autoRecord: true,
+    autoRecord: true,            // auto-start recording in active Meet calls
+    autoConfigureCalendar: true, // auto-open Video call options on Calendar event creation
     transcription: true,
     geminiNotes: true,
     captions: false,

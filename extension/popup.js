@@ -5,6 +5,7 @@
 
   const fields = {
     autoRecord: document.getElementById('autoRecord'),
+    autoConfigureCalendar: document.getElementById('autoConfigureCalendar'),
     transcription: document.getElementById('transcription'),
     geminiNotes: document.getElementById('geminiNotes'),
     captions: document.getElementById('captions'),
@@ -28,6 +29,7 @@
   async function save() {
     const patch = {
       autoRecord: fields.autoRecord.checked,
+      autoConfigureCalendar: fields.autoConfigureCalendar.checked,
       transcription: fields.transcription.checked,
       geminiNotes: fields.geminiNotes.checked,
       captions: fields.captions.checked,
@@ -66,6 +68,7 @@
     }
 
     fields.autoRecord.checked = s.autoRecord;
+    fields.autoConfigureCalendar.checked = s.autoConfigureCalendar !== false;
     fields.transcription.checked = s.transcription;
     fields.geminiNotes.checked = s.geminiNotes;
     fields.captions.checked = s.captions;
