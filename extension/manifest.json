@@ -1,16 +1,16 @@
 {
   "manifest_version": 3,
   "name": "Google Meet Auto Record (Workspace)",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "description": "Automatically enables recording, transcription, and Gemini notes for Google Meet meetings",
   "permissions": ["storage"],
   "host_permissions": [
-    "https://calendar.google.com/*",
+    "https://calendar.google.com/calendar/*",
     "https://meet.google.com/*"
   ],
   "content_scripts": [
     {
-      "matches": ["https://calendar.google.com/*"],
+      "matches": ["https://calendar.google.com/calendar/*"],
       "js": ["settings.js", "content-calendar.js"],
       "css": ["styles.css"],
       "run_at": "document_idle"
